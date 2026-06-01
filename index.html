@@ -585,6 +585,26 @@
     </div>
   </div>
 
+  <div id="payModal" class="modal-screen" role="dialog" aria-modal="true" aria-labelledby="payTitle">
+    <form id="payForm" class="pay-dialog">
+      <div class="pay-head">
+        <div class="item-title">
+          <h2 id="payTitle">Pay Someone</h2>
+          <span>Choose a person, then enter the amount.</span>
+        </div>
+        <button id="closePayButton" class="danger" type="button">Close</button>
+      </div>
+      <div id="payPeople" class="person-grid"></div>
+      <label>
+        Amount
+        <input id="payAmount" inputmode="decimal" min="0.01" step="0.01" type="number" required>
+      </label>
+      <div id="taxPreview" class="tax-preview">Choose a person to see the total.</div>
+      <button class="primary" type="submit">Pay</button>
+      <div id="payMessage" class="error"></div>
+    </form>
+  </div>
+
   <main class="app">
     <section id="loginView" class="login panel">
       <h1>Cambridge Countries</h1>
@@ -622,37 +642,16 @@
             <span id="countryText" class="meta"></span>
             <span class="home-caption">This is your private balance. Other people cannot see how much money you have.</span>
           </div>
+          <button id="openPayButton" class="primary pay-launch" type="button">Pay</button>
           <div id="governmentPill" class="pill hidden"></div>
         </section>
       </section>
 
       <section id="transactionsView" class="view">
-        <div class="transactions-grid">
-          <form id="sendForm" class="section panel">
-            <h2>Send Money</h2>
-            <label>
-              Send to
-              <input id="sendTo" list="accountList" required>
-            </label>
-            <div class="form-row">
-              <label>
-                Amount
-                <input id="sendAmount" inputmode="decimal" min="0.01" step="0.01" type="number" required>
-              </label>
-              <label>
-                Message
-                <input id="sendNote" maxlength="160">
-              </label>
-            </div>
-            <button class="primary" type="submit">Send Money</button>
-            <div id="sendMessage" class="success"></div>
-          </form>
-
-          <section class="section panel">
-            <h2>Transactions</h2>
-            <div id="transactionList" class="transaction-list"></div>
-          </section>
-        </div>
+        <section class="section panel">
+          <h2>Transactions</h2>
+          <div id="transactionList" class="transaction-list"></div>
+        </section>
       </section>
 
       <section id="governmentView" class="view">
@@ -676,7 +675,8 @@
       token: localStorage.getItem(SESSION_KEY) || '',
       data: null,
       activeTab: 'home',
-      loadingCount: 0
+      loadingCount: 0,
+      selectedPayUsername: ''
     };
 
     const tabs = [
@@ -701,21 +701,32 @@
       }, 'loginError', null, 'Opening Cambridge Countries...');
     });
 
-    $('sendForm').addEventListener('submit', async (event) => {
+    $('openPayButton').addEventListener('click', () => {
+      openPayModal();
+    });
+
+    $('closePayButton').addEventListener('click', () => {
+      closePayModal();
+    });
+
+    $('payAmount').addEventListener('input', () => {
+      updatePayPreview();
+    });
+
+    $('payForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      $('sendMessage').textContent = '';
+      $('payMessage').textContent = '';
       await run(async () => {
+        if (!state.selectedPayUsername) throw new Error('Choose who to pay.');
         const response = await api({
           action: 'sendPersonal',
           token: state.token,
-          toUsername: $('sendTo').value,
-          amount: $('sendAmount').value,
-          note: $('sendNote').value
+          toUsername: state.selectedPayUsername,
+          amount: $('payAmount').value
         });
         receiveDashboard(response);
-        $('sendForm').reset();
-        $('sendMessage').textContent = 'Sent. Your balance is updated.';
-      }, 'sendMessage', null, 'Sending money...');
+        closePayModal();
+      }, 'payMessage', null, 'Processing payment...');
     });
 
     $('logoutButton').addEventListener('click', async () => {
@@ -911,6 +922,99 @@
         option.label = account.displayName;
         $('accountList').appendChild(option);
       });
+
+      renderPayPeople();
+    }
+
+    function openPayModal() {
+      state.selectedPayUsername = '';
+      $('payForm').reset();
+      $('payMessage').textContent = '';
+      renderPayPeople();
+      updatePayPreview();
+      $('payModal').classList.add('show');
+    }
+
+    function closePayModal() {
+      $('payModal').classList.remove('show');
+      state.selectedPayUsername = '';
+      $('payForm').reset();
+      $('payMessage').textContent = '';
+      updatePayPreview();
+    }
+
+    function renderPayPeople() {
+      if (!state.data) return;
+      $('payPeople').innerHTML = '';
+
+      state.data.accounts
+        .filter((account) => account.username !== state.data.user.username)
+        .forEach((account) => {
+          const country = countryFor(account.countryId);
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = `person-choice${state.selectedPayUsername === account.username ? ' selected' : ''}`;
+          button.innerHTML = `
+            <strong>${escapeHtml(account.displayName)}</strong>
+            <span class="meta">${escapeHtml(country ? country.countryName : account.countryId)}</span>
+          `;
+          button.addEventListener('click', () => {
+            state.selectedPayUsername = account.username;
+            renderPayPeople();
+            updatePayPreview();
+          });
+          $('payPeople').appendChild(button);
+        });
+    }
+
+    function updatePayPreview() {
+      if (!state.data) return;
+      const amount = Number($('payAmount').value || 0);
+      const recipient = state.data.accounts.find((account) => account.username === state.selectedPayUsername);
+
+      if (!recipient) {
+        $('taxPreview').textContent = 'Choose a person to see the total.';
+        return;
+      }
+
+      if (!amount || amount <= 0) {
+        $('taxPreview').textContent = `Paying ${recipient.displayName}. Enter an amount to continue.`;
+        return;
+      }
+
+      const user = state.data.user;
+      const senderCountry = countryFor(user.countryId);
+      const receiverCountry = countryFor(recipient.countryId);
+      const crossCountry = normalizeKey(user.countryId) !== normalizeKey(recipient.countryId);
+      const taxRate = crossCountry ? 5 : Number(senderCountry ? senderCountry.taxRatePercent : 0);
+      const tax = roundDisplay(amount * taxRate / 100);
+      const total = roundDisplay(amount + tax);
+
+      if (crossCountry) {
+        $('taxPreview').innerHTML = `
+          <strong>Cross-country tax: 5%</strong>
+          <span>${escapeHtml(recipient.displayName)} receives ${formatMoney(amount, user.currencyName)}.</span>
+          <span>You pay ${formatMoney(total, user.currencyName)} total, including ${formatMoney(tax, user.currencyName)} tax.</span>
+          <span class="meta">The tax goes to ${escapeHtml(senderCountry ? senderCountry.countryName : user.countryId)}'s government.</span>
+          <span class="meta">Sending to ${escapeHtml(receiverCountry ? receiverCountry.countryName : recipient.countryId)}.</span>
+        `;
+        return;
+      }
+
+      if (taxRate > 0) {
+        $('taxPreview').innerHTML = `
+          <strong>${escapeHtml(senderCountry ? senderCountry.countryName : user.countryId)} within-country tax: ${taxRate}%</strong>
+          <span>${escapeHtml(recipient.displayName)} receives ${formatMoney(amount, user.currencyName)}.</span>
+          <span>You pay ${formatMoney(total, user.currencyName)} total, including ${formatMoney(tax, user.currencyName)} tax.</span>
+          <span class="meta">The tax goes back to your government account.</span>
+        `;
+        return;
+      }
+
+      $('taxPreview').innerHTML = `
+        <strong>No within-country tax</strong>
+        <span>${escapeHtml(recipient.displayName)} receives ${formatMoney(amount, user.currencyName)}.</span>
+      `;
     }
 
     function renderGovernments() {
@@ -925,7 +1029,7 @@
           <div class="item-head">
             <div class="item-title">
               <h2>${escapeHtml(country.countryName)} Government Account</h2>
-              <span>${escapeHtml(country.currencyName)} · Country funds</span>
+              <span>${escapeHtml(country.currencyName)} · ${escapeHtml(country.taxRatePercent)}% within-country tax</span>
             </div>
             <div class="money">${formatMoney(country.governmentBalance, country.currencyName)}</div>
           </div>
@@ -942,10 +1046,6 @@
                 <input name="amount" inputmode="decimal" min="0.01" step="0.01" type="number" required>
               </label>
             </div>
-            <label>
-              Message
-              <input name="note" maxlength="160">
-            </label>
             <button class="primary" type="submit">Send Government Money</button>
             <div class="success" data-message></div>
           </form>
@@ -962,6 +1062,10 @@
                 <input name="currencyName" value="${escapeAttr(country.currencyName)}" required>
               </label>
             </div>
+            <label>
+              Within-country tax rate
+              <input name="taxRatePercent" value="${escapeAttr(country.taxRatePercent)}" inputmode="decimal" min="0" max="100" step="0.01" type="number" required>
+            </label>
             <button class="secondary" type="submit">Save Country</button>
             <div class="success" data-message></div>
           </form>
@@ -987,8 +1091,7 @@
               token: state.token,
               countryId: form.dataset.countryId,
               toUsername: form.elements.toUsername.value,
-              amount: form.elements.amount.value,
-              note: form.elements.note.value
+              amount: form.elements.amount.value
             });
             receiveDashboard(response);
             message.textContent = 'Government money sent.';
@@ -1007,7 +1110,8 @@
               token: state.token,
               countryId: form.dataset.countryId,
               countryName: form.elements.countryName.value,
-              currencyName: form.elements.currencyName.value
+              currencyName: form.elements.currencyName.value,
+              taxRatePercent: form.elements.taxRatePercent.value
             });
             receiveDashboard(response);
             message.textContent = 'Country details saved.';
@@ -1026,7 +1130,7 @@
           <div class="item-head">
             <div class="item-title">
               <h2>${escapeHtml(country.countryName)}</h2>
-              <span>${escapeHtml(country.countryId)} · ${escapeHtml(country.currencyName)}</span>
+              <span>${escapeHtml(country.countryId)} · ${escapeHtml(country.currencyName)} · ${escapeHtml(country.taxRatePercent)}% within-country tax</span>
             </div>
             <div class="meta">${country.people.length} ${country.people.length === 1 ? 'person' : 'people'}</div>
           </div>
@@ -1068,7 +1172,7 @@
           <div class="item-head">
             <div class="item-title">
               <strong>${escapeHtml(tx.sourceName)} → ${escapeHtml(tx.targetName)}</strong>
-              <span>${formatDate(tx.timestamp)} · ${escapeHtml(tx.note || 'No message')}</span>
+              <span>${transactionSubtext(tx)}</span>
             </div>
             <div class="money">${formatMoney(tx.amount, tx.currencyName)}</div>
           </div>
@@ -1078,15 +1182,31 @@
     }
 
     function transactionKind(tx) {
+      if (tx.targetType === 'GOVERNMENT' && tx.sourceType === 'ACCOUNT') {
+        return 'Country tax';
+      }
       if (tx.sourceType === 'GOVERNMENT' || tx.targetType === 'GOVERNMENT') {
         return 'Government transfer';
       }
       return 'Personal transfer';
     }
 
+    function transactionSubtext(tx) {
+      const date = formatDate(tx.timestamp);
+      return tx.note ? `${escapeHtml(date)} · ${escapeHtml(tx.note)}` : escapeHtml(date);
+    }
+
     function countryNameFor(countryId) {
-      const country = state.data.countries.find((item) => item.countryId === countryId);
+      const country = countryFor(countryId);
       return country ? country.countryName : countryId;
+    }
+
+    function countryFor(countryId) {
+      return state.data.countries.find((item) => normalizeKey(item.countryId) === normalizeKey(countryId));
+    }
+
+    function normalizeKey(value) {
+      return String(value || '').trim().toUpperCase();
     }
 
     function assignTempId(element) {
@@ -1099,6 +1219,10 @@
         minimumFractionDigits: 2,
         maximumFractionDigits: 2
       })} ${currencyName || 'money'}`;
+    }
+
+    function roundDisplay(value) {
+      return Math.round(Number(value || 0) * 100) / 100;
     }
 
     function formatDate(value) {
